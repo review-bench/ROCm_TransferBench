@@ -55,6 +55,12 @@ THE SOFTWARE.
 
 #ifdef NIC_EXEC_ENABLED
 #include <infiniband/verbs.h>
+#if IBV_DIRECT
+  #define IBV_FN(name, rettype, arglist) constexpr rettype(*pfn_##name)arglist = name;
+#else
+  #include <dlfcn.h>
+  #define IBV_FN(name, rettype, arglist) rettype(*pfn_##name)arglist = nullptr;
+#endif
 #endif
 
 #ifdef MPI_COMM_ENABLED
@@ -736,11 +742,36 @@ namespace TransferBench
       return false;               \
   } while (0)
 
+namespace {
+  IBV_FN(ibv_alloc_pd, ibv_pd*, (ibv_context*));
+  IBV_FN(ibv_close_device, int, (ibv_context*));
+  IBV_FN(ibv_create_cq, ibv_cq*, (ibv_context*, int, void*, ibv_comp_channel*, int));
+  IBV_FN(ibv_create_qp, ibv_qp*, (ibv_pd*, ibv_qp_init_attr*));
+  IBV_FN(ibv_dealloc_pd, int, (ibv_pd*));
+  IBV_FN(ibv_dereg_mr, int, (ibv_mr*));
+  IBV_FN(ibv_destroy_cq, int, (ibv_cq*));
+  IBV_FN(ibv_destroy_qp, int, (ibv_qp*));
+  IBV_FN(ibv_free_device_list, void, (ibv_device**));
+  IBV_FN(ibv_get_device_list, ibv_device**, (int*));
+  IBV_FN(ibv_get_device_name, const char*, (ibv_device*));
+  IBV_FN(ibv_modify_qp, int, (ibv_qp*, ibv_qp_attr*, int));
+  IBV_FN(ibv_open_device, ibv_context*, (ibv_device*));
+  IBV_FN(ibv_poll_cq, int, (ibv_cq*, int, ibv_wc*));
+  IBV_FN(ibv_post_send, int, (ibv_qp*, ibv_send_wr*, ibv_send_wr**));
+  IBV_FN(ibv_query_device, int, (ibv_context*, ibv_device_attr*));
+  IBV_FN(ibv_query_gid, int, (ibv_context*, uint8_t, int, ibv_gid*));
+  IBV_FN(ibv_query_port, int, (ibv_context*, uint8_t, ibv_port_attr*));
+#ifdef HAVE_DMABUF_SUPPORT
+  IBV_FN(ibv_reg_dmabuf_mr, ibv_mr*, (ibv_pd*, uint64_t, size_t, uint64_t, int, int));
+#endif
+  IBV_FN(ibv_reg_mr, ibv_mr*, (ibv_pd*, void*, size_t, int));
+}
+
 // Helper macros for calling RDMA functions and reporting errors
 #ifdef VERBS_DEBUG
 #define IBV_CALL(__func__, ...)                                         \
   do {                                                                  \
-    int error = __func__(__VA_ARGS__);                                  \
+    int error = pfn_##__func__(__VA_ARGS__);                            \
     if (error != 0) {                                                   \
       return {ERR_FATAL, "Encountered IbVerbs error (%d) at line (%d) " \
               "and function (%s)", (error), __LINE__, #__func__};       \
@@ -749,7 +780,7 @@ namespace TransferBench
 
 #define IBV_PTR_CALL(__ptr__, __func__, ...)                               \
   do {                                                                     \
-    __ptr__ = __func__(__VA_ARGS__);                                       \
+    __ptr__ = pfn_##__func__(__VA_ARGS__);                                 \
     if (__ptr__ == nullptr) {                                              \
       return {ERR_FATAL, "Encountered IbVerbs nullptr error at line (%d) " \
               "and function (%s)", __LINE__, #__func__};                   \
@@ -758,7 +789,7 @@ namespace TransferBench
 #else
 #define IBV_CALL(__func__, ...)                                           \
   do {                                                                    \
-    int error = __func__(__VA_ARGS__);                                    \
+    int error = pfn_##__func__(__VA_ARGS__);                              \
     if (error != 0) {                                                     \
       return {ERR_FATAL, "Encountered IbVerbs error (%d=%s) in func (%s)" \
               , error, strerror(errno), #__func__};                       \
@@ -767,7 +798,7 @@ namespace TransferBench
 
 #define IBV_PTR_CALL(__ptr__, __func__, ...)                                    \
   do {                                                                          \
-    __ptr__ = __func__(__VA_ARGS__);                                            \
+    __ptr__ = pfn_##__func__(__VA_ARGS__);                                      \
     if (__ptr__ == nullptr) {                                                   \
       return {ERR_FATAL, "Encountered IbVerbs nullptr error (%s) in func (%s) " \
               , strerror(errno), #__func__};                                    \
@@ -1006,6 +1037,7 @@ namespace {
     bool IsSamePod(int targetRank, int sourceRank) const;
     std::string GetExecutorName(ExeDevice exeDevice) const;
     int NicIsActive(int nicIndex, int targetRank) const;
+    bool IbvLoaded() const;
 
 #if !defined(__NVCC__)
     ErrResult GetHsaAgent(ExeDevice const& exeDevice, hsa_agent_t& agent) const;
@@ -1032,6 +1064,8 @@ namespace {
     bool verbose = false;
     bool rankDoesOutput = true;
     FILE* dumpCfgFile = nullptr;
+    bool ibvLoaded = false;
+    void* ibvLibHandle = nullptr;
 
 #if !defined(__NVCC__)
     std::vector<hsa_agent_t> cpuAgents;
@@ -2341,6 +2375,11 @@ namespace {
       case EXE_NIC: case EXE_NIC_NEAREST:
 #ifdef NIC_EXEC_ENABLED
       {
+        if (!System::Get().IbvLoaded()) {
+          errors.push_back({ERR_FATAL, "Transfer %d: NIC executor is requested but IB verbs is not loaded.", i});
+          hasFatalError = true;
+          break;
+        }
         // NIC Executors can only execute a copy operation
         if (t.srcs.size() != 1 || t.dsts.size() != 1) {
           errors.push_back({ERR_FATAL, "Transfer %d: NIC executor requires single SRC and single DST", i});
@@ -2671,7 +2710,7 @@ namespace {
 #ifdef NIC_EXEC_ENABLED
 // Function to collect information about IBV devices
 //========================================================================================
-static bool IsConfiguredGid(union ibv_gid const& gid)
+  static bool IsConfiguredGid(union ibv_gid const& gid)
   {
     const struct in6_addr *a = (struct in6_addr *) gid.raw;
     int trailer = (a->s6_addr32[1] | a->s6_addr32[2] | a->s6_addr32[3]);
@@ -2696,7 +2735,8 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                                         int const&  gidIndex,
                                         int&        version)
   {
-    char const* deviceName = ibv_get_device_name(context->device);
+    char const* deviceName;
+    IBV_PTR_CALL(deviceName, ibv_get_device_name, context->device);
     char gidRoceVerStr[16]      = {};
     char roceTypePath[PATH_MAX] = {};
     sprintf(roceTypePath, "/sys/class/infiniband/%s/ports/%d/gid_attrs/types/%d",
@@ -2778,17 +2818,68 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+  // Should only be called with IBV_DIRECT guard
+  static void* Ibvdl() {
+    static void* ibvLibHandle = nullptr;
+    if (ibvLibHandle) return ibvLibHandle;
+
+    void *handle = dlopen("libibverbs.so.1", RTLD_NOW);
+    if (handle != nullptr) {
+      struct Symbol { void **ppfn; char const *name; };
+      Symbol symbols[] = {
+        { (void**)&pfn_ibv_alloc_pd, "ibv_alloc_pd" },
+        { (void**)&pfn_ibv_close_device, "ibv_close_device" },
+        { (void**)&pfn_ibv_create_cq, "ibv_create_cq" },
+        { (void**)&pfn_ibv_create_qp, "ibv_create_qp" },
+        { (void**)&pfn_ibv_dealloc_pd, "ibv_dealloc_pd" },
+        { (void**)&pfn_ibv_dereg_mr, "ibv_dereg_mr" },
+        { (void**)&pfn_ibv_destroy_cq, "ibv_destroy_cq" },
+        { (void**)&pfn_ibv_destroy_qp, "ibv_destroy_qp" },
+        { (void**)&pfn_ibv_free_device_list, "ibv_free_device_list" },
+        { (void**)&pfn_ibv_get_device_list, "ibv_get_device_list" },
+        { (void**)&pfn_ibv_get_device_name, "ibv_get_device_name" },
+        { (void**)&pfn_ibv_modify_qp, "ibv_modify_qp" },
+        { (void**)&pfn_ibv_open_device, "ibv_open_device" },
+        { (void**)&pfn_ibv_poll_cq, "ibv_poll_cq" },
+        { (void**)&pfn_ibv_post_send, "ibv_post_send" },
+        { (void**)&pfn_ibv_query_device, "ibv_query_device" },
+        { (void**)&pfn_ibv_query_gid, "ibv_query_gid" },
+        { (void**)&pfn_ibv_query_port, "ibv_query_port" },
+#ifdef HAVE_DMABUF_SUPPORT
+        { (void**)&pfn_ibv_reg_dmabuf_mr, "ibv_reg_dmabuf_mr" },
+#endif
+        { (void**)&pfn_ibv_reg_mr, "ibv_reg_mr" },
+      };
+      for (size_t i = 0; i < sizeof(symbols) / sizeof(symbols[0]); i++) {
+        *symbols[i].ppfn = dlsym(handle, symbols[i].name);
+        if (*symbols[i].ppfn == nullptr) {
+          // Log("[WARN] Failed to load symbol %s", symbols[i].name);
+          dlclose(handle);
+          break;
+        }
+      }
+      ibvLibHandle = handle;
+    }
+
+    return ibvLibHandle;
+  }
+
   static vector<IbvDevice>& GetIbvDeviceList()
   {
     static bool isInitialized = false;
     static vector<IbvDevice> ibvDeviceList = {};
 
+#if !defined(IBV_DIRECT)
+    if (ibvLibHandle == nullptr) {
+      return ibvDeviceList;
+    }
+#endif
     // Build list on first use
     if (!isInitialized) {
 
       // Query the number of IBV devices
       int numIbvDevices = 0;
-      ibv_device** deviceList = ibv_get_device_list(&numIbvDevices);
+      ibv_device** deviceList = pfn_ibv_get_device_list(&numIbvDevices);
 
       // Check for TB_NIC_FILTER
       // By default, accept all NIC names
@@ -2806,15 +2897,15 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           ibvDevice.name = deviceList[i]->name;
           ibvDevice.hasActivePort = false;
           {
-            struct ibv_context *context = ibv_open_device(ibvDevice.devicePtr);
+            struct ibv_context *context = pfn_ibv_open_device(ibvDevice.devicePtr);
             if (context) {
               struct ibv_device_attr deviceAttr;
-              if (!ibv_query_device(context, &deviceAttr)) {
+              if (!pfn_ibv_query_device(context, &deviceAttr)) {
                 int activePort;
                 ibvDevice.gidIndex = -1;
                 for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
                   struct ibv_port_attr portAttr;
-                  if (ibv_query_port(context, port, &portAttr)) continue;
+                  if (pfn_ibv_query_port(context, port, &portAttr)) continue;
                   if (portAttr.state == IBV_PORT_ACTIVE) {
                     activePort = port;
                     ibvDevice.hasActivePort = true;
@@ -2831,7 +2922,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
                   }
                 }
               }
-              ibv_close_device(context);
+              pfn_ibv_close_device(context);
             }
           }
           ibvDevice.busId = "";
@@ -5810,6 +5901,19 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
       Log("[INFO] Running in single node mode\n");
     }
 
+#ifdef NIC_EXEC_ENABLED
+#if IBV_DIRECT
+    ibvLoaded = true;
+#else
+    ibvLoaded = true;
+    ibvLibHandle = Ibvdl();
+    if (ibvLibHandle == nullptr) {
+      Log("[WARN] Failed to open libibverbs.so.1");
+      ibvLoaded = false;
+    } 
+#endif
+#endif
+
     // Collect topology and distribute across all ranks
     CollectTopology();
   }
@@ -5840,6 +5944,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
     if (dumpCfgFile) {
       fclose(dumpCfgFile);
+    }
+
+    if (ibvLibHandle) {
+      dlclose(ibvLibHandle);
+      ibvLibHandle = nullptr;
     }
 
 #ifdef AMD_SMI_ENABLED
@@ -7014,6 +7123,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     if (targetRank < 0 || targetRank >= numRanks) targetRank = rank;
     if (rankInfo[targetRank].nicIsActive.count(nicIndex) == 0) return 0;
     return rankInfo[targetRank].nicIsActive.at(nicIndex);
+  }
+
+  bool System::IbvLoaded() const
+  {
+    return ibvLoaded;
   }
 
   int GetNumExecutors(ExeType exeType, int targetRank)

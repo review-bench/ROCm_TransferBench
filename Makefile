@@ -9,6 +9,7 @@ MPI_PATH  ?= /usr/local/openmpi
 
 # Optional features (set to 0 to disable, 1 to enable)
 # DISABLE_NIC_EXEC: Disable RDMA/NIC executor support (default: 0)
+# DISABLE_IBV_DIRECT: When NIC support is on, use dlsym for libibverbs instead of direct linkage (default: 0)
 # DISABLE_MPI_COMM: Disable MPI communicator support (default: 0)
 # DISABLE_DMA_BUF: Disable DMA-BUF support for GPU Direct RDMA (default: 1)
 # DISABLE_AMD_SMI: Disable AMD-SMI pod membership checking support (default: 0)
@@ -85,7 +86,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
   # 1) DISABLE_NIC_EXEC is not set to 1
   # 2) IBVerbs is found in the Dynamic Linker cache
   # 3) infiniband/verbs.h is found in the default include path
+  # When enabled, -DIBV_DIRECT=1 is added unless DISABLE_IBV_DIRECT=1 (verbs via direct link + constexpr pfn_*)
   DISABLE_NIC_EXEC ?= 0
+  DISABLE_IBV_DIRECT ?= 0
   ifneq ($(DISABLE_NIC_EXEC),1)
     $(info Attempting to build with NIC executor support)
     ifeq ("$(shell ldconfig -p | grep -c ibverbs)", "0")
@@ -96,6 +99,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       COMMON_FLAGS += -DNIC_EXEC_ENABLED
       LDFLAGS += -libverbs
       NIC_ENABLED = 1
+      ifneq ($(DISABLE_IBV_DIRECT),1)
+        COMMON_FLAGS += -DIBV_DIRECT=1
+      endif
 
       # Disable DMA-BUF support by default (set DISABLE_DMA_BUF=0 to enable)
       DISABLE_DMA_BUF ?= 1
@@ -123,6 +129,9 @@ ifeq ($(filter clean,$(MAKECMDGOALS)),)
       $(info - To use the TransferBench RDMA executor, check if your system has NICs, the NIC drivers are installed, and libibverbs-dev is installed)
     else
       $(info - Building with NIC executor support. Can set DISABLE_NIC_EXEC=1 to disable)
+      ifeq ($(DISABLE_IBV_DIRECT),1)
+        $(info - IBV_DIRECT disabled: libibverbs via dlsym, DISABLE_IBV_DIRECT=1)
+      endif
     endif
   endif
 
