@@ -54,13 +54,7 @@ THE SOFTWARE.
 #include <vector>
 
 #ifdef NIC_EXEC_ENABLED
-#include <infiniband/verbs.h>
-#if IBV_DIRECT
-  #define IBV_FN(name, rettype, arglist) constexpr rettype(*pfn_##name)arglist = name;
-#else
-  #include <dlfcn.h>
-  #define IBV_FN(name, rettype, arglist) rettype(*pfn_##name)arglist = nullptr;
-#endif
+#include "IbvDynload.hpp"
 #endif
 
 #ifdef MPI_COMM_ENABLED
@@ -742,32 +736,8 @@ namespace TransferBench
       return false;               \
   } while (0)
 
-namespace {
-  IBV_FN(ibv_alloc_pd, ibv_pd*, (ibv_context*));
-  IBV_FN(ibv_close_device, int, (ibv_context*));
-  IBV_FN(ibv_create_cq, ibv_cq*, (ibv_context*, int, void*, ibv_comp_channel*, int));
-  IBV_FN(ibv_create_qp, ibv_qp*, (ibv_pd*, ibv_qp_init_attr*));
-  IBV_FN(ibv_dealloc_pd, int, (ibv_pd*));
-  IBV_FN(ibv_dereg_mr, int, (ibv_mr*));
-  IBV_FN(ibv_destroy_cq, int, (ibv_cq*));
-  IBV_FN(ibv_destroy_qp, int, (ibv_qp*));
-  IBV_FN(ibv_free_device_list, void, (ibv_device**));
-  IBV_FN(ibv_get_device_list, ibv_device**, (int*));
-  IBV_FN(ibv_get_device_name, const char*, (ibv_device*));
-  IBV_FN(ibv_modify_qp, int, (ibv_qp*, ibv_qp_attr*, int));
-  IBV_FN(ibv_open_device, ibv_context*, (ibv_device*));
-  IBV_FN(ibv_poll_cq, int, (ibv_cq*, int, ibv_wc*));
-  IBV_FN(ibv_post_send, int, (ibv_qp*, ibv_send_wr*, ibv_send_wr**));
-  IBV_FN(ibv_query_device, int, (ibv_context*, ibv_device_attr*));
-  IBV_FN(ibv_query_gid, int, (ibv_context*, uint8_t, int, ibv_gid*));
-  IBV_FN(ibv_query_port, int, (ibv_context*, uint8_t, ibv_port_attr*));
-#ifdef HAVE_DMABUF_SUPPORT
-  IBV_FN(ibv_reg_dmabuf_mr, ibv_mr*, (ibv_pd*, uint64_t, size_t, uint64_t, int, int));
-#endif
-  IBV_FN(ibv_reg_mr, ibv_mr*, (ibv_pd*, void*, size_t, int));
-}
-
 // Helper macros for calling RDMA functions and reporting errors
+#ifdef NIC_EXEC_ENABLED
 #ifdef VERBS_DEBUG
 #define IBV_CALL(__func__, ...)                                         \
   do {                                                                  \
@@ -805,6 +775,7 @@ namespace {
     }                                                                           \
   } while (0)
 #endif
+#endif // NIC_EXEC_ENABLED
 
 namespace TransferBench
 {
@@ -1065,7 +1036,6 @@ namespace {
     bool rankDoesOutput = true;
     FILE* dumpCfgFile = nullptr;
     bool ibvLoaded = false;
-    void* ibvLibHandle = nullptr;
 
 #if !defined(__NVCC__)
     std::vector<hsa_agent_t> cpuAgents;
@@ -2818,60 +2788,14 @@ namespace {
     return ERR_NONE;
   }
 
-  // Should only be called with IBV_DIRECT guard
-  static void* Ibvdl() {
-    static void* ibvLibHandle = nullptr;
-    if (ibvLibHandle) return ibvLibHandle;
-
-    void *handle = dlopen("libibverbs.so.1", RTLD_NOW);
-    if (handle != nullptr) {
-      struct Symbol { void **ppfn; char const *name; };
-      Symbol symbols[] = {
-        { (void**)&pfn_ibv_alloc_pd, "ibv_alloc_pd" },
-        { (void**)&pfn_ibv_close_device, "ibv_close_device" },
-        { (void**)&pfn_ibv_create_cq, "ibv_create_cq" },
-        { (void**)&pfn_ibv_create_qp, "ibv_create_qp" },
-        { (void**)&pfn_ibv_dealloc_pd, "ibv_dealloc_pd" },
-        { (void**)&pfn_ibv_dereg_mr, "ibv_dereg_mr" },
-        { (void**)&pfn_ibv_destroy_cq, "ibv_destroy_cq" },
-        { (void**)&pfn_ibv_destroy_qp, "ibv_destroy_qp" },
-        { (void**)&pfn_ibv_free_device_list, "ibv_free_device_list" },
-        { (void**)&pfn_ibv_get_device_list, "ibv_get_device_list" },
-        { (void**)&pfn_ibv_get_device_name, "ibv_get_device_name" },
-        { (void**)&pfn_ibv_modify_qp, "ibv_modify_qp" },
-        { (void**)&pfn_ibv_open_device, "ibv_open_device" },
-        { (void**)&pfn_ibv_poll_cq, "ibv_poll_cq" },
-        { (void**)&pfn_ibv_post_send, "ibv_post_send" },
-        { (void**)&pfn_ibv_query_device, "ibv_query_device" },
-        { (void**)&pfn_ibv_query_gid, "ibv_query_gid" },
-        { (void**)&pfn_ibv_query_port, "ibv_query_port" },
-#ifdef HAVE_DMABUF_SUPPORT
-        { (void**)&pfn_ibv_reg_dmabuf_mr, "ibv_reg_dmabuf_mr" },
-#endif
-        { (void**)&pfn_ibv_reg_mr, "ibv_reg_mr" },
-      };
-      for (size_t i = 0; i < sizeof(symbols) / sizeof(symbols[0]); i++) {
-        *symbols[i].ppfn = dlsym(handle, symbols[i].name);
-        if (*symbols[i].ppfn == nullptr) {
-          // Log("[WARN] Failed to load symbol %s", symbols[i].name);
-          dlclose(handle);
-          break;
-        }
-      }
-      ibvLibHandle = handle;
-    }
-
-    return ibvLibHandle;
-  }
-
   static vector<IbvDevice>& GetIbvDeviceList()
   {
     static bool isInitialized = false;
     static vector<IbvDevice> ibvDeviceList = {};
 
 #if !defined(IBV_DIRECT)
-    if (ibvLibHandle == nullptr) {
-      return ibvDeviceList;
+    if (!TbIbvSymbolsReady() && !isInitialized) {
+      isInitialized = true;
     }
 #endif
     // Build list on first use
@@ -2879,7 +2803,7 @@ namespace {
 
       // Query the number of IBV devices
       int numIbvDevices = 0;
-      ibv_device** deviceList = pfn_ibv_get_device_list(&numIbvDevices);
+      ibv_device** deviceList = ibv_get_device_list(&numIbvDevices);
 
       // Check for TB_NIC_FILTER
       // By default, accept all NIC names
@@ -2897,15 +2821,15 @@ namespace {
           ibvDevice.name = deviceList[i]->name;
           ibvDevice.hasActivePort = false;
           {
-            struct ibv_context *context = pfn_ibv_open_device(ibvDevice.devicePtr);
+            struct ibv_context *context = ibv_open_device(ibvDevice.devicePtr);
             if (context) {
               struct ibv_device_attr deviceAttr;
-              if (!pfn_ibv_query_device(context, &deviceAttr)) {
+              if (!ibv_query_device(context, &deviceAttr)) {
                 int activePort;
                 ibvDevice.gidIndex = -1;
                 for (int port = 1; port <= deviceAttr.phys_port_cnt; ++port) {
                   struct ibv_port_attr portAttr;
-                  if (pfn_ibv_query_port(context, port, &portAttr)) continue;
+                  if (ibv_query_port(context, port, &portAttr)) continue;
                   if (portAttr.state == IBV_PORT_ACTIVE) {
                     activePort = port;
                     ibvDevice.hasActivePort = true;
@@ -2922,7 +2846,7 @@ namespace {
                   }
                 }
               }
-              pfn_ibv_close_device(context);
+              ibv_close_device(context);
             }
           }
           ibvDevice.busId = "";
@@ -4977,7 +4901,7 @@ namespace {
 
       // Use DMA copy engine
       do {
-#if defined(__NVCC__)
+#if defined(CUMEM_ENABLED)
         ERR_CHECK(cuMemcpyAsync((CUdeviceptr)resources.dstMem[0],
                                 (CUdeviceptr)resources.srcMem[0],
                                 resources.numBytes, stream));
@@ -5114,7 +5038,20 @@ namespace {
     }
   }
 
-#if defined(__NVCC__)
+#if !defined(__NVCC__)
+  ErrResult::ErrResult(hsa_status_t err)
+  {
+    if (err == HSA_STATUS_SUCCESS) {
+      this->errType = ERR_NONE;
+      this->errMsg  = "";
+    } else {
+      const char *errString = NULL;
+      hsa_status_string(err, &errString);
+      this->errType = ERR_FATAL;
+      this->errMsg  = std::string("HSA Error: ") + errString;
+    }
+  }
+#elif defined(CUMEM_ENABLED)
   ErrResult::ErrResult(CUresult err)
   {
     if (err == CUDA_SUCCESS) {
@@ -5127,19 +5064,6 @@ namespace {
       this->errType = ERR_FATAL;
       this->errMsg  = std::string("CUDA Driver Error: ") + errName
                       + " (" + errString + ")";
-    }
-  }
-#else
-  ErrResult::ErrResult(hsa_status_t err)
-  {
-    if (err == HSA_STATUS_SUCCESS) {
-      this->errType = ERR_NONE;
-      this->errMsg  = "";
-    } else {
-      const char *errString = NULL;
-      hsa_status_string(err, &errString);
-      this->errType = ERR_FATAL;
-      this->errMsg  = std::string("HSA Error: ") + errString;
     }
   }
 #endif
@@ -5902,15 +5826,12 @@ namespace {
     }
 
 #ifdef NIC_EXEC_ENABLED
-#if IBV_DIRECT
-    ibvLoaded = true;
-#else
-    ibvLoaded = true;
-    ibvLibHandle = Ibvdl();
-    if (ibvLibHandle == nullptr) {
-      Log("[WARN] Failed to open libibverbs.so.1");
-      ibvLoaded = false;
-    } 
+    TbIbvEnsureLoaded();
+    ibvLoaded = TbIbvSymbolsReady();
+#if !defined(IBV_DIRECT)
+    if (!ibvLoaded) {
+      Log("[WARN] Failed to load libibverbs.so.1 or required symbols\n");
+    }
 #endif
 #endif
 
@@ -5946,14 +5867,13 @@ namespace {
       fclose(dumpCfgFile);
     }
 
-    if (ibvLibHandle) {
-      dlclose(ibvLibHandle);
-      ibvLibHandle = nullptr;
-    }
+#ifdef NIC_EXEC_ENABLED
+    TbIbvUnload();
+#endif
 
 #ifdef AMD_SMI_ENABLED
     amdsmi_shut_down();
-#elif defined(__NVCC__) && defined(POD_COMM_ENABLED)
+#elif defined(NVML_ENABLED)
     nvmlShutdown();
 #endif
   }
