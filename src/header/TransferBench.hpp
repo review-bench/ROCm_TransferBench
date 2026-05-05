@@ -2790,6 +2790,11 @@ namespace {
     vector<hipEvent_t>         stopEvents;        ///< HIP stop timing event
     int                        wallClockRate;     ///< (GFX-only) Device wall clock rate
     int                        gfxKernelToUse;    ///< (GFX-only) Which GFX kernel to use
+
+    // For EXE_GPU_INITIATED_DMA (anvil)
+#ifdef ANVIL_EXEC_ENABLED
+    vector<sdma_ep::SdmaQueueInfo> anvilQueues; ///< One KFD SDMA queue per transfer
+#endif
   };
 
   // Structure to track PCIe topology
