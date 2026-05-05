@@ -78,6 +78,9 @@ THE SOFTWARE.
 #ifdef AMD_SMI_ENABLED
 #include "amd_smi/amdsmi.h"
 #endif
+#ifdef ANVIL_EXEC_ENABLED
+#include "anvil.hpp"
+#endif
 #endif
 /// @endcond
 
@@ -102,16 +105,23 @@ namespace TransferBench
    */
   enum ExeType
   {
-    EXE_CPU          = 0,                       ///<  CPU executor              (subExecutor = CPU thread)
-    EXE_GPU_GFX      = 1,                       ///<  GPU kernel-based executor (subExecutor = threadblock/CU)
-    EXE_GPU_DMA      = 2,                       ///<  GPU SDMA executor         (subExecutor = not supported)
-    EXE_NIC          = 3,                       ///<  NIC RDMA executor         (subExecutor = queue pair)
-    EXE_NIC_NEAREST  = 4,                       ///<  NIC RDMA nearest executor (subExecutor = queue pair)
-    EXE_GPU_BDMA     = 5,                       ///<  GPU Batched SDMA executor (subExecutor = batch item)
+    EXE_CPU                = 0,  ///< CPU Executor
+    EXE_GPU_GFX            = 1,  ///< GPU GFX (shader) Executor
+    EXE_GPU_DMA            = 2,  ///< GPU DMA Executor (CPU-initiated via hipMemcpy/HSA)
+    EXE_NIC                = 3,  ///< NIC Executor
+    EXE_NIC_NEAREST        = 4,  ///< Nearest NIC Executor
+    EXE_GPU_BDMA           = 5,  ///< GPU Batched DMA Executor
+    EXE_GPU_INITIATED_DMA  = 6,  ///< GPU-initiated SDMA Executor (anvil/KFD, AMD only)
   };
-  char const ExeTypeStr[7] = "CGDINB";
+  char const ExeTypeStr[8] = "CGDINBS";
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
-  inline bool IsGpuExeType(ExeType e){ return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA; }
+  inline bool IsGpuExeType(ExeType e){
+    return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA
+#ifdef ANVIL_EXEC_ENABLED
+        || e == EXE_GPU_INITIATED_DMA
+#endif
+    ;
+  }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
   /**
