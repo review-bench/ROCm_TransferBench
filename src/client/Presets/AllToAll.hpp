@@ -52,7 +52,7 @@ int AllToAllPreset(EnvVars&          ev,
   int numResults    = EnvVars::GetEnvVar("NUM_RESULTS"    , numRanks > 1 ? 1 : 0);
   int numSubExecs   = EnvVars::GetEnvVar("NUM_SUB_EXEC"   , 8);
   int showDetails   = EnvVars::GetEnvVar("SHOW_DETAILS"   , 0);
-  int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);
+  int useDmaExec    = EnvVars::GetEnvVar("USE_DMA_EXEC"   , 0);  // 0=GFX, 1=DMA, 2=BMA, 3=GISDMA(anvil)
   int useRemoteRead = EnvVars::GetEnvVar("USE_REMOTE_READ", 0);
 
   // Check that all ranks have at least the number of GPUs requested
@@ -105,7 +105,10 @@ int AllToAllPreset(EnvVars&          ev,
         ev.Print("NUM_RESULTS"  , numResults   , "Showing top/bottom %d results", numResults);
       ev.Print("NUM_SUB_EXEC"   , numSubExecs  , "Using %d subexecutors/CUs per Transfer", numSubExecs);
       ev.Print("SHOW_DETAILS"   , showDetails  , "%s full Test details", showDetails ? "Showing" : "Hiding");
-      ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor", useDmaExec ? "DMA" : "GFX");
+      ev.Print("USE_DMA_EXEC"   , useDmaExec   , "Using %s executor",
+               useDmaExec == 3 ? "GISDMA (GPU-initiated SDMA/anvil)" :
+               useDmaExec == 2 ? "BMA" :
+               useDmaExec == 1 ? "DMA" : "GFX");
       ev.Print("USE_REMOTE_READ", useRemoteRead, "Using %s as executor", useRemoteRead ? "DST" : "SRC");
       printf("\n");
     }
@@ -115,17 +118,29 @@ int AllToAllPreset(EnvVars&          ev,
     Utils::Print("[ERROR] Cannot use %d GPUs.  Detected %d GPUs\n", numGpus, numDetectedGpus);
     return ERR_FATAL;
   }
-  if (useDmaExec && (numSrcs != 1 || numDsts != 1)) {
-    Utils::Print("[ERROR] DMA execution can only be used for copies (A2A_MODE=0)\n");
+  if (useDmaExec < 0 || useDmaExec > 3) {
+    Utils::Print("[ERROR] USE_DMA_EXEC must be 0 (GFX), 1 (DMA), 2 (BMA), or 3 (GISDMA)\n");
     return ERR_FATAL;
   }
+  if (useDmaExec && (numSrcs != 1 || numDsts != 1)) {
+    Utils::Print("[ERROR] DMA/BMA/GISDMA execution can only be used for copies (A2A_MODE=0)\n");
+    return ERR_FATAL;
+  }
+#ifndef ANVIL_EXEC_ENABLED
+  if (useDmaExec == 3) {
+    Utils::Print("[ERROR] USE_DMA_EXEC=3 (GISDMA) requires building with -DENABLE_ANVIL_EXEC=ON\n");
+    return ERR_FATAL;
+  }
+#endif
   if (numResults * 2 > numRanks) {
     Utils::Print("[ERROR] Number of extrema results requested exceeds number of ranks.  NUM_RESULTS should be at most half the number of ranks\n");
     return ERR_FATAL;
   }
 
   // Collect the number of GPU devices to use
-  ExeType exeType = useDmaExec ? EXE_GPU_DMA : EXE_GPU_GFX;
+  ExeType exeType = (useDmaExec == 3) ? EXE_GPU_INITIATED_DMA :
+                    (useDmaExec == 2) ? EXE_GPU_BDMA :
+                    (useDmaExec == 1) ? EXE_GPU_DMA : EXE_GPU_GFX;
 
   std::vector<std::map<std::pair<int, int>, int>> reIndex(numRanks);
   std::vector<Transfer> transfers;
@@ -182,10 +197,13 @@ int AllToAllPreset(EnvVars&          ev,
     }
   }
 
-  Utils::Print("GPU-%s All-To-All benchmark:\n", useDmaExec ? "DMA" : "GFX");
+  char const* exeTypeLabel = (useDmaExec == 3) ? "GISDMA" :
+                             (useDmaExec == 2) ? "BMA"    :
+                             (useDmaExec == 1) ? "DMA"    : "GFX";
+  Utils::Print("GPU-%s All-To-All benchmark:\n", exeTypeLabel);
   Utils::Print("==============================\n");
   Utils::Print("[%lu bytes per Transfer] [%s:%d] [%d Read(s) %d Write(s)] [MemType:%s] [NIC QueuePairs:%d] [#Ranks:%d]\n",
-               numBytesPerTransfer, useDmaExec ? "DMA" : "GFX", numSubExecs, numSrcs, numDsts,
+               numBytesPerTransfer, exeTypeLabel, numSubExecs, numSrcs, numDsts,
                devMemTypeStr.c_str(), numQueuePairs, numRanks);
 
   // Execute Transfers
