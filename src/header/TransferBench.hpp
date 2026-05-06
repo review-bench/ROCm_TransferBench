@@ -80,6 +80,7 @@ THE SOFTWARE.
 #endif
 #ifdef ANVIL_EXEC_ENABLED
 #include "anvil.hpp"
+#include "sdma-ep.h"
 #endif
 #endif
 /// @endcond
@@ -4185,6 +4186,57 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     return ERR_NONE;
   }
 
+#ifdef ANVIL_EXEC_ENABLED
+  // Initialize anvil SDMA queues for EXE_GPU_INITIATED_DMA executor.
+  // Uses AnvilLib singleton: init (idempotent), connect, createSdmaQueue.
+  // Stores SdmaQueueInfo (deviceHandle, src/dst device IDs, channelIdx) per resource.
+  // The SdmaQueue objects are owned by AnvilLib and live for the process lifetime.
+  static ErrResult PrepareAnvilExecutor(ConfigOptions    const& cfg,
+                                        vector<Transfer> const& transfers,
+                                        ExeDevice        const& exeDevice,
+                                        ExeInfo&                exeInfo)
+  {
+    int const srcDeviceId = exeDevice.exeIndex;
+    ERR_CHECK(hipSetDevice(srcDeviceId));
+
+    try {
+      // Initialize the AnvilLib singleton (idempotent via std::call_once)
+      anvil::AnvilLib& anvilLib = anvil::AnvilLib::getInstance();
+      anvilLib.init();
+
+      int const numResources = exeInfo.resources.size();
+      exeInfo.anvilQueues.resize(numResources);
+
+      for (int i = 0; i < numResources; ++i) {
+        Transfer const& t     = transfers[exeInfo.resources[i].transferIdx];
+        int const dstDeviceId = t.dsts[0].memIndex;
+
+        // Enable peer access and resolve XGMI-optimal SDMA engine; create queue
+        int channelIdx = -1;
+        anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
+        uint32_t const engineId = static_cast<uint32_t>(
+          anvilLib.getSdmaEngineId(srcDeviceId, dstDeviceId));
+        anvil::SdmaQueue* queue = anvilLib.createSdmaQueue(
+          srcDeviceId, dstDeviceId, engineId, &channelIdx);
+        if (!queue) {
+          return {ERR_FATAL,
+                  "PrepareAnvilExecutor: createSdmaQueue failed for src=%d dst=%d",
+                  srcDeviceId, dstDeviceId};
+        }
+
+        // Populate SdmaQueueInfo from the created SdmaQueue
+        exeInfo.anvilQueues[i].deviceHandle = queue->deviceHandle();
+        exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
+        exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
+        exeInfo.anvilQueues[i].channelIdx   = channelIdx;
+      }
+    } catch (std::exception const& ex) {
+      return {ERR_FATAL, "PrepareAnvilExecutor: exception: %s", ex.what()};
+    }
+    return ERR_NONE;
+  }
+#endif
+
   // Prepare each executor
   // Allocates memory for src/dst, prepares subexecutors, executor-specific data structures
   static ErrResult PrepareExecutor(ConfigOptions    const& cfg,
@@ -4340,8 +4392,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Prepare additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
-        && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA
+#ifdef ANVIL_EXEC_ENABLED
+         || exeDevice.exeType == EXE_GPU_INITIATED_DMA
+#endif
+        ) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
@@ -4364,7 +4419,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
 
+#ifdef ANVIL_EXEC_ENABLED
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents || exeDevice.exeType == EXE_GPU_INITIATED_DMA) {
+#else
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+#endif
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4373,6 +4432,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
     }
+
+#ifdef ANVIL_EXEC_ENABLED
+    if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+      ERR_CHECK(PrepareAnvilExecutor(cfg, transfers, exeDevice, exeInfo));
+    }
+#endif
 
     // Prepare for GPU GFX executor
     if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
@@ -4570,17 +4635,32 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Teardown additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA)
-        && exeDevice.exeRank == localRank) {
+    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA
+#ifdef ANVIL_EXEC_ENABLED
+         || exeDevice.exeType == EXE_GPU_INITIATED_DMA
+#endif
+        ) && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
+#ifdef ANVIL_EXEC_ENABLED
+      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents || exeDevice.exeType == EXE_GPU_INITIATED_DMA) {
+#else
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
+#endif
         for (auto event : exeInfo.startEvents)
           ERR_CHECK(hipEventDestroy(event));
         for (auto event : exeInfo.stopEvents)
           ERR_CHECK(hipEventDestroy(event));
       }
     }
+
+#ifdef ANVIL_EXEC_ENABLED
+    if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+      // SdmaQueue objects are owned by the AnvilLib singleton and are destroyed
+      // at process exit. Clear the info vector to drop our references.
+      exeInfo.anvilQueues.clear();
+    }
+#endif
 
     if (exeDevice.exeType == EXE_GPU_GFX && exeDevice.exeRank == localRank) {
 #if !defined(__NVCC__)
