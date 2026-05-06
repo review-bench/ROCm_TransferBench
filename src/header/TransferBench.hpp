@@ -118,10 +118,7 @@ namespace TransferBench
   inline bool IsCpuExeType(ExeType e){ return e == EXE_CPU; }
   inline bool IsGpuExeType(ExeType e){
     return e == EXE_GPU_GFX || e == EXE_GPU_DMA || e == EXE_GPU_BDMA
-#ifdef ANVIL_EXEC_ENABLED
-        || e == EXE_GPU_INITIATED_DMA
-#endif
-    ;
+        || e == EXE_GPU_INITIATED_DMA;
   }
   inline bool IsNicExeType(ExeType e){ return e == EXE_NIC || e == EXE_NIC_NEAREST; }
 
@@ -4392,11 +4389,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Prepare additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA
-#ifdef ANVIL_EXEC_ENABLED
-         || exeDevice.exeType == EXE_GPU_INITIATED_DMA
-#endif
-        ) && exeDevice.exeRank == localRank) {
+    if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       ERR_CHECK(hipSetDevice(exeDevice.exeIndex));
 
       // Determine how many streams to use
@@ -4419,11 +4412,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         }
       }
 
-#ifdef ANVIL_EXEC_ENABLED
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents || exeDevice.exeType == EXE_GPU_INITIATED_DMA) {
-#else
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
-#endif
         exeInfo.startEvents.resize(numStreamsToUse);
         exeInfo.stopEvents.resize(numStreamsToUse);
         for (int i = 0; i < numStreamsToUse; ++i) {
@@ -4635,18 +4624,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     }
 
     // Teardown additional requirements for GPU-based executors
-    if ((exeDevice.exeType == EXE_GPU_GFX || exeDevice.exeType == EXE_GPU_DMA || exeDevice.exeType == EXE_GPU_BDMA
-#ifdef ANVIL_EXEC_ENABLED
-         || exeDevice.exeType == EXE_GPU_INITIATED_DMA
-#endif
-        ) && exeDevice.exeRank == localRank) {
+    if (IsGpuExeType(exeDevice.exeType) && exeDevice.exeRank == localRank) {
       for (auto stream : exeInfo.streams)
         ERR_CHECK(hipStreamDestroy(stream));
-#ifdef ANVIL_EXEC_ENABLED
       if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents || exeDevice.exeType == EXE_GPU_INITIATED_DMA) {
-#else
-      if (cfg.gfx.useHipEvents || cfg.dma.useHipEvents) {
-#endif
         for (auto event : exeInfo.startEvents)
           ERR_CHECK(hipEventDestroy(event));
         for (auto event : exeInfo.stopEvents)
