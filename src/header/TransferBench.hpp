@@ -4196,6 +4196,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int const srcDeviceId = exeDevice.exeIndex;
     ERR_CHECK(hipSetDevice(srcDeviceId));
 
+    bool const verbose = System::Get().IsVerbose();
+    if (verbose) {
+      System::Get().Log("[ANVIL] PrepareAnvilExecutor: src GPU %d  %zu resource(s)\n",
+                        srcDeviceId, exeInfo.resources.size());
+    }
+
     try {
       // Initialize the AnvilLib singleton (idempotent via std::call_once)
       anvil::AnvilLib& anvilLib = anvil::AnvilLib::getInstance();
@@ -4213,6 +4219,12 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         anvil::EnablePeerAccess(srcDeviceId, dstDeviceId);
         uint32_t const engineId = static_cast<uint32_t>(
           anvilLib.getSdmaEngineId(srcDeviceId, dstDeviceId));
+
+        if (verbose) {
+          System::Get().Log("[ANVIL]   resource[%d]: transfer %d  dst GPU %d  SDMA engine %u\n",
+                            i, exeInfo.resources[i].transferIdx, dstDeviceId, engineId);
+        }
+
         anvil::SdmaQueue* queue = anvilLib.createSdmaQueue(
           srcDeviceId, dstDeviceId, engineId, &channelIdx);
         if (!queue) {
@@ -4226,6 +4238,11 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         exeInfo.anvilQueues[i].srcDeviceId  = srcDeviceId;
         exeInfo.anvilQueues[i].dstDeviceId  = dstDeviceId;
         exeInfo.anvilQueues[i].channelIdx   = channelIdx;
+
+        if (verbose) {
+          System::Get().Log("[ANVIL]   resource[%d]: channelIdx %d  deviceHandle %p\n",
+                            i, channelIdx, (void*)queue->deviceHandle());
+        }
       }
     } catch (std::exception const& ex) {
       return {ERR_FATAL, "PrepareAnvilExecutor: exception: %s", ex.what()};
@@ -4637,6 +4654,18 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
 
 #ifdef ANVIL_EXEC_ENABLED
     if (exeDevice.exeType == EXE_GPU_INITIATED_DMA && exeDevice.exeRank == localRank) {
+      if (verbose) {
+        System::Get().Log("[ANVIL] TeardownExecutor: releasing %zu queue reference(s) for src GPU %d\n",
+                          exeInfo.anvilQueues.size(), exeDevice.exeIndex);
+        for (size_t i = 0; i < exeInfo.anvilQueues.size(); ++i) {
+          System::Get().Log("[ANVIL]   anvilQueues[%zu]: src GPU %d  dst GPU %d  channel %d  handle %p\n",
+                            i,
+                            exeInfo.anvilQueues[i].srcDeviceId,
+                            exeInfo.anvilQueues[i].dstDeviceId,
+                            exeInfo.anvilQueues[i].channelIdx,
+                            (void*)exeInfo.anvilQueues[i].deviceHandle);
+        }
+      }
       // SdmaQueue objects are owned by the AnvilLib singleton and are destroyed
       // at process exit. Clear the info vector to drop our references.
       exeInfo.anvilQueues.clear();
