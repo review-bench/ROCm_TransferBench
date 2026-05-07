@@ -6561,10 +6561,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         result |= RecursiveWildcardTransferExpansion(wc, baseRankIndex, numBytes, numSubExecs, transfers);
         wc.exe.exeSubIndices[0] = -2;
         return result;
-      case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
-#ifdef ANVIL_EXEC_ENABLED
-      case EXE_GPU_INITIATED_DMA:
-#endif
+      case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_INITIATED_DMA:
       {
         // Iterate over all available subindices
         ExeDevice exeDevice = {wc.exe.exeType, wc.exe.exeIndices[0], wc.exe.exeRanks[0], 0};
