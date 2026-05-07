@@ -7922,10 +7922,7 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
         return {ERR_FATAL, "CPU index must be between 0 and %d inclusively", numCpus - 1};
       agent = cpuAgents[exeDevice.exeIndex];
       break;
-    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA:
-#ifdef ANVIL_EXEC_ENABLED
-    case EXE_GPU_INITIATED_DMA:
-#endif
+    case EXE_GPU_GFX: case EXE_GPU_DMA: case EXE_GPU_BDMA: case EXE_GPU_INITIATED_DMA:
       if (exeIndex < 0 || exeIndex >= numGpus)
         return {ERR_FATAL, "GPU index must be between 0 and %d inclusively", numGpus - 1};
       agent = gpuAgents[exeIndex];
