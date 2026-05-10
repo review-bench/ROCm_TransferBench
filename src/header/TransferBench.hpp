@@ -2313,12 +2313,20 @@ namespace {
         }
         break;
       case EXE_GPU_DMA:
-        if (t.srcs.size() != 1) {
+        if (t.srcs.size() > 1) {
           errors.push_back({ERR_FATAL,
-                            "Transfer %d: DMA executor must have exactly 1 source", i});
+                            "Transfer %d: DMA executor must have 0 or 1 sources", i});
           hasFatalError = true;
           break;
         }
+#if defined(__NVCC__)
+        if (t.srcs.empty()) {
+          errors.push_back({ERR_FATAL,
+                            "Transfer %d: DMA memset (0 sources) not supported on NVIDIA hardware", i});
+          hasFatalError = true;
+          break;
+        }
+#endif
         if (t.dsts.size() < 1) {
           errors.push_back({ERR_FATAL,
                             "Transfer %d: DMA executor must have at least 1 destination", i});
@@ -2341,6 +2349,12 @@ namespace {
           hasFatalError = true;
           break;
 #else
+          if (t.srcs.empty()) {
+            errors.push_back({ERR_FATAL,
+                              "Transfer %d: DMA memset (0 sources) does not support engine selection", i});
+            hasFatalError = true;
+            break;
+          }
           useSubIndexCount[t.exeDevice]++;
           int numSubIndices = GetNumExecutorSubIndices(t.exeDevice);
           if (t.exeSubIndex >= numSubIndices) {
@@ -2361,7 +2375,6 @@ namespace {
               hasFatalError = true;
               break;
             }
-
           }
 
           int numDsts = (int)t.dsts.size();
@@ -2400,22 +2413,24 @@ namespace {
 #endif
         }
 
-        if (!IsGpuMemType(t.srcs[0].memType) && !IsGpuMemType(t.dsts[0].memType)) {
-          errors.push_back({ERR_WARN,
-              "Transfer %d: No GPU memory for source or destination.  Copy might not execute on DMA %d",
-              i, t.exeDevice.exeIndex});
-        } else {
-          // Currently HIP will use src agent if source memory is GPU, otherwise dst agent
-          if (IsGpuMemType(t.srcs[0].memType)) {
-            if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
-              errors.push_back({ERR_WARN,
-                  "Transfer %d: DMA executor may automatically switch to using the source memory device (%d) not (%d)",
-                  i, t.srcs[0].memIndex, t.exeDevice.exeIndex});
-            }
-          } else if (t.dsts[0].memIndex != t.exeDevice.exeIndex) {
+        if (!t.srcs.empty()) {
+          if (!IsGpuMemType(t.srcs[0].memType) && !IsGpuMemType(t.dsts[0].memType)) {
             errors.push_back({ERR_WARN,
-                "Transfer %d: DMA executor may automatically switch to using the destination memory device (%d) not (%d)",
-                i, t.dsts[0].memIndex, t.exeDevice.exeIndex});
+                "Transfer %d: No GPU memory for source or destination.  Copy might not execute on DMA %d",
+                i, t.exeDevice.exeIndex});
+          } else {
+            // Currently HIP will use src agent if source memory is GPU, otherwise dst agent
+            if (IsGpuMemType(t.srcs[0].memType)) {
+              if (t.srcs[0].memIndex != t.exeDevice.exeIndex) {
+                errors.push_back({ERR_WARN,
+                    "Transfer %d: DMA executor may automatically switch to using the source memory device (%d) not (%d)",
+                    i, t.srcs[0].memIndex, t.exeDevice.exeIndex});
+              }
+            } else if (t.dsts[0].memIndex != t.exeDevice.exeIndex) {
+              errors.push_back({ERR_WARN,
+                  "Transfer %d: DMA executor may automatically switch to using the destination memory device (%d) not (%d)",
+                  i, t.dsts[0].memIndex, t.exeDevice.exeIndex});
+            }
           }
         }
         break;
@@ -4263,8 +4278,10 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
           rss.dstAgent[dstIdx] = info.agentOwner;
         }
 
-        ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
-        rss.srcAgent = info.agentOwner;
+        if (!rss.srcMem.empty()) {
+          ERR_CHECK(hsa_amd_pointer_info(rss.srcMem[0], &info, NULL, NULL, NULL));
+          rss.srcAgent = info.agentOwner;
+        }
 
         // Create HSA completion signal
         ERR_CHECK(hsa_signal_create(1, 0, NULL, &rss.signal));
@@ -5450,7 +5467,20 @@ static bool IsConfiguredGid(union ibv_gid const& gid)
     int numDsts = (int)resources.dstMem.size();
     ERR_CHECK(hipSetDevice(exeIndex));
     int subIterations = 0;
-    if (!useSubIndices && !cfg.dma.useHsaCopy) {
+    if (resources.srcMem.empty()) {
+      // DMA memset: fill each destination via LINEAR_FILL on SDMA DACC BE.
+      // count is in uint32_t units; value matches MEMSET_VAL byte pattern (0x4B4B4B4B).
+#if !defined(__NVCC__)
+      uint32_t fillVal;
+      float const f = MEMSET_VAL;
+      memcpy(&fillVal, &f, sizeof(fillVal));
+      size_t const count = resources.numBytes / sizeof(uint32_t);
+      do {
+        for (int dstIdx = 0; dstIdx < numDsts; dstIdx++)
+          ERR_CHECK(hsa_amd_memory_fill(resources.dstMem[dstIdx], fillVal, count));
+      } while (++subIterations != cfg.general.numSubIterations);
+#endif
+    } else if (!useSubIndices && !cfg.dma.useHsaCopy) {
       if (cfg.dma.useHipEvents)
         ERR_CHECK(hipEventRecord(startEvent, stream));
 
